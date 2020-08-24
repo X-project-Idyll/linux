@@ -134,7 +134,7 @@ static void __init __sme_early_map_unmap_mem(void *vaddr, unsigned long size,
 		size = (size <= PMD_SIZE) ? 0 : size - PMD_SIZE;
 	} while (size);
 
-	__native_flush_tlb();
+	flush_tlb_local();
 }
 
 void __init sme_unmap_bootdata(char *real_mode_data)
@@ -344,13 +344,11 @@ bool sme_active(void)
 {
 	return sme_me_mask && !sev_enabled;
 }
-EXPORT_SYMBOL(sme_active);
 
 bool sev_active(void)
 {
 	return sme_me_mask && sev_enabled;
 }
-EXPORT_SYMBOL(sev_active);
 
 /* Override for DMA direct allocation check - ARCH_HAS_FORCE_DMA_UNENCRYPTED */
 bool force_dma_unencrypted(struct device *dev)
@@ -369,7 +367,7 @@ bool force_dma_unencrypted(struct device *dev)
 	if (sme_active()) {
 		u64 dma_enc_mask = DMA_BIT_MASK(__ffs64(sme_me_mask));
 		u64 dma_dev_mask = min_not_zero(dev->coherent_dma_mask,
-						dev->bus_dma_mask);
+						dev->bus_dma_limit);
 
 		if (dma_dev_mask <= dma_enc_mask)
 			return true;
@@ -378,7 +376,6 @@ bool force_dma_unencrypted(struct device *dev)
 	return false;
 }
 
-/* Architecture __weak replacement functions */
 void __init mem_encrypt_free_decrypted_mem(void)
 {
 	unsigned long vaddr, vaddr_end, npages;
@@ -403,6 +400,7 @@ void __init mem_encrypt_free_decrypted_mem(void)
 	free_init_pages("unused decrypted", vaddr, vaddr_end);
 }
 
+/* Architecture __weak replacement functions */
 void __init mem_encrypt_init(void)
 {
 	if (!sme_me_mask)

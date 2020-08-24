@@ -39,7 +39,6 @@
 #include <linux/init.h>
 #include <linux/netdevice.h>
 #include <net/net_namespace.h>
-#include <net/netns/generic.h>
 #include <linux/security.h>
 #include <linux/notifier.h>
 #include <linux/hashtable.h>
@@ -111,17 +110,7 @@ static void ib_client_put(struct ib_client *client)
  */
 #define CLIENT_DATA_REGISTERED XA_MARK_1
 
-/**
- * struct rdma_dev_net - rdma net namespace metadata for a net
- * @net:	Pointer to owner net namespace
- * @id:		xarray id to identify the net namespace.
- */
-struct rdma_dev_net {
-	possible_net_t net;
-	u32 id;
-};
-
-static unsigned int rdma_dev_net_id;
+unsigned int rdma_dev_net_id;
 
 /*
  * A list of net namespaces is maintained in an xarray. This is necessary
@@ -139,17 +128,14 @@ module_param_named(netns_mode, ib_devices_shared_netns, bool, 0444);
 MODULE_PARM_DESC(netns_mode,
 		 "Share device among net namespaces; default=1 (shared)");
 /**
- * rdma_dev_access_netns() - Return whether a rdma device can be accessed
+ * rdma_dev_access_netns() - Return whether an rdma device can be accessed
  *			     from a specified net namespace or not.
- * @device:	Pointer to rdma device which needs to be checked
+ * @dev:	Pointer to rdma device which needs to be checked
  * @net:	Pointer to net namesapce for which access to be checked
  *
- * rdma_dev_access_netns() - Return whether a rdma device can be accessed
- *			     from a specified net namespace or not. When
- *			     rdma device is in shared mode, it ignores the
- *			     net namespace. When rdma device is exclusive
- *			     to a net namespace, rdma device net namespace is
- *			     checked against the specified one.
+ * When the rdma device is in shared mode, it ignores the net namespace.
+ * When the rdma device is exclusive to a net namespace, rdma device net
+ * namespace is checked against the specified one.
  */
 bool rdma_dev_access_netns(const struct ib_device *dev, const struct net *net)
 {
@@ -286,7 +272,6 @@ static void ib_device_check_mandatory(struct ib_device *device)
 	} mandatory_table[] = {
 		IB_MANDATORY_FUNC(query_device),
 		IB_MANDATORY_FUNC(query_port),
-		IB_MANDATORY_FUNC(query_pkey),
 		IB_MANDATORY_FUNC(alloc_pd),
 		IB_MANDATORY_FUNC(dealloc_pd),
 		IB_MANDATORY_FUNC(create_qp),
@@ -514,6 +499,9 @@ static void ib_device_release(struct device *device)
 			  rcu_head);
 	}
 
+	mutex_destroy(&dev->unregistration_lock);
+	mutex_destroy(&dev->compat_devs_mutex);
+
 	xa_destroy(&dev->compat_devs);
 	xa_destroy(&dev->client_data);
 	kfree_rcu(dev, rcu_head);
@@ -598,7 +586,8 @@ struct ib_device *_ib_alloc_device(size_t size)
 	rdma_init_coredev(&device->coredev, device, &init_net);
 
 	INIT_LIST_HEAD(&device->event_handler_list);
-	spin_lock_init(&device->event_handler_lock);
+	spin_lock_init(&device->qp_open_list_lock);
+	init_rwsem(&device->event_handler_rwsem);
 	mutex_init(&device->unregistration_lock);
 	/*
 	 * client_data needs to be alloc because we don't want our mark to be
@@ -687,8 +676,20 @@ static int add_client_context(struct ib_device *device,
 	if (ret)
 		goto out;
 	downgrade_write(&device->client_data_rwsem);
-	if (client->add)
-		client->add(device);
+	if (client->add) {
+		if (client->add(device)) {
+			/*
+			 * If a client fails to add then the error code is
+			 * ignored, but we won't call any more ops on this
+			 * client.
+			 */
+			xa_erase(&device->client_data, client->client_id);
+			up_read(&device->client_data_rwsem);
+			ib_device_put(device);
+			ib_client_put(client);
+			return 0;
+		}
+	}
 
 	/* Readers shall not see a client until add has been completed */
 	xa_set_mark(&device->client_data, client->client_id,
@@ -906,7 +907,9 @@ static int add_one_compat_dev(struct ib_device *device,
 	cdev->dev.parent = device->dev.parent;
 	rdma_init_coredev(cdev, device, read_pnet(&rnet->net));
 	cdev->dev.release = compatdev_release;
-	dev_set_name(&cdev->dev, "%s", dev_name(&device->dev));
+	ret = dev_set_name(&cdev->dev, "%s", dev_name(&device->dev));
+	if (ret)
+		goto add_err;
 
 	ret = device_add(&cdev->dev);
 	if (ret)
@@ -1060,7 +1063,7 @@ int rdma_compatdev_set(u8 enable)
 
 static void rdma_dev_exit_net(struct net *net)
 {
-	struct rdma_dev_net *rnet = net_generic(net, rdma_dev_net_id);
+	struct rdma_dev_net *rnet = rdma_net_to_dev_net(net);
 	struct ib_device *dev;
 	unsigned long index;
 	int ret;
@@ -1094,25 +1097,32 @@ static void rdma_dev_exit_net(struct net *net)
 	}
 	up_read(&devices_rwsem);
 
+	rdma_nl_net_exit(rnet);
 	xa_erase(&rdma_nets, rnet->id);
 }
 
 static __net_init int rdma_dev_init_net(struct net *net)
 {
-	struct rdma_dev_net *rnet = net_generic(net, rdma_dev_net_id);
+	struct rdma_dev_net *rnet = rdma_net_to_dev_net(net);
 	unsigned long index;
 	struct ib_device *dev;
 	int ret;
+
+	write_pnet(&rnet->net, net);
+
+	ret = rdma_nl_net_init(rnet);
+	if (ret)
+		return ret;
 
 	/* No need to create any compat devices in default init_net. */
 	if (net_eq(net, &init_net))
 		return 0;
 
-	write_pnet(&rnet->net, net);
-
 	ret = xa_alloc(&rdma_nets, &rnet->id, rnet, xa_limit_32b, GFP_KERNEL);
-	if (ret)
+	if (ret) {
+		rdma_nl_net_exit(rnet);
 		return ret;
+	}
 
 	down_read(&devices_rwsem);
 	xa_for_each_marked (&devices, index, dev, DEVICE_REGISTERED) {
@@ -1172,6 +1182,8 @@ static void setup_dma_device(struct ib_device *device)
 	struct device *parent = device->dev.parent;
 
 	WARN_ON_ONCE(device->dma_device);
+
+#ifdef CONFIG_DMA_OPS
 	if (device->dev.dma_ops) {
 		/*
 		 * The caller provided custom DMA operations. Copy the
@@ -1192,7 +1204,9 @@ static void setup_dma_device(struct ib_device *device)
 			else
 				WARN_ON_ONCE(true);
 		}
-	} else {
+	} else
+#endif /* CONFIG_DMA_OPS */
+	{
 		/*
 		 * The caller did not provide custom DMA operations. Use the
 		 * DMA mapping operations of the parent device.
@@ -1200,9 +1214,21 @@ static void setup_dma_device(struct ib_device *device)
 		WARN_ON_ONCE(!parent);
 		device->dma_device = parent;
 	}
-	/* Setup default max segment size for all IB devices */
-	dma_set_max_seg_size(device->dma_device, SZ_2G);
 
+	if (!device->dev.dma_parms) {
+		if (parent) {
+			/*
+			 * The caller did not provide DMA parameters, so
+			 * 'parent' probably represents a PCI device. The PCI
+			 * core sets the maximum segment size to 64
+			 * KB. Increase this parameter to 2 GB.
+			 */
+			device->dev.dma_parms = parent->dma_parms;
+			dma_set_max_seg_size(device->dma_device, SZ_2G);
+		} else {
+			WARN_ON_ONCE(true);
+		}
+	}
 }
 
 /*
@@ -1316,9 +1342,15 @@ out:
 	return ret;
 }
 
+static void prevent_dealloc_device(struct ib_device *ib_dev)
+{
+}
+
 /**
  * ib_register_device - Register an IB device with IB core
- * @device:Device to register
+ * @device: Device to register
+ * @name: unique string device name. This may include a '%' which will
+ * cause a unique index to be added to the passed device name.
  *
  * Low-level drivers use ib_register_device() to register their
  * devices with the IB core.  All registered clients will receive a
@@ -1368,6 +1400,7 @@ int ib_register_device(struct ib_device *device, const char *name)
 		goto dev_cleanup;
 	}
 
+	ib_cq_pool_init(device);
 	ret = enable_device_and_get(device);
 	dev_set_uevent_suppress(&device->dev, false);
 	/* Mark for userspace that device is ready */
@@ -1383,11 +1416,11 @@ int ib_register_device(struct ib_device *device, const char *name)
 		 * possibility for a parallel unregistration along with this
 		 * error flow. Since we have a refcount here we know any
 		 * parallel flow is stopped in disable_device and will see the
-		 * NULL pointers, causing the responsibility to
+		 * special dealloc_driver pointer, causing the responsibility to
 		 * ib_dealloc_device() to revert back to this thread.
 		 */
 		dealloc_fn = device->ops.dealloc_driver;
-		device->ops.dealloc_driver = NULL;
+		device->ops.dealloc_driver = prevent_dealloc_device;
 		ib_device_put(device);
 		__ib_unregister_device(device);
 		device->ops.dealloc_driver = dealloc_fn;
@@ -1422,6 +1455,7 @@ static void __ib_unregister_device(struct ib_device *ib_dev)
 		goto out;
 
 	disable_device(ib_dev);
+	ib_cq_pool_destroy(ib_dev);
 
 	/* Expedite removing unregistered pointers from the hash table */
 	free_netdevs(ib_dev);
@@ -1435,7 +1469,8 @@ static void __ib_unregister_device(struct ib_device *ib_dev)
 	 * Drivers using the new flow may not call ib_dealloc_device except
 	 * in error unwind prior to registration success.
 	 */
-	if (ib_dev->ops.dealloc_driver) {
+	if (ib_dev->ops.dealloc_driver &&
+	    ib_dev->ops.dealloc_driver != prevent_dealloc_device) {
 		WARN_ON(kref_read(&ib_dev->dev.kobj.kref) <= 1);
 		ib_dealloc_device(ib_dev);
 	}
@@ -1445,7 +1480,7 @@ out:
 
 /**
  * ib_unregister_device - Unregister an IB device
- * @device: The device to unregister
+ * @ib_dev: The device to unregister
  *
  * Unregister an IB device.  All clients will receive a remove callback.
  *
@@ -1467,7 +1502,7 @@ EXPORT_SYMBOL(ib_unregister_device);
 
 /**
  * ib_unregister_device_and_put - Unregister a device while holding a 'get'
- * device: The device to unregister
+ * @ib_dev: The device to unregister
  *
  * This is the same as ib_unregister_device(), except it includes an internal
  * ib_device_put() that should match a 'get' obtained by the caller.
@@ -1537,7 +1572,7 @@ static void ib_unregister_work(struct work_struct *work)
 
 /**
  * ib_unregister_device_queued - Unregister a device using a work queue
- * device: The device to unregister
+ * @ib_dev: The device to unregister
  *
  * This schedules an asynchronous unregistration using a WQ for the device. A
  * driver should use this to avoid holding locks while doing unregistration,
@@ -1921,17 +1956,15 @@ EXPORT_SYMBOL(ib_set_client_data);
  *
  * ib_register_event_handler() registers an event handler that will be
  * called back when asynchronous IB events occur (as defined in
- * chapter 11 of the InfiniBand Architecture Specification).  This
- * callback may occur in interrupt context.
+ * chapter 11 of the InfiniBand Architecture Specification). This
+ * callback occurs in workqueue context.
  */
 void ib_register_event_handler(struct ib_event_handler *event_handler)
 {
-	unsigned long flags;
-
-	spin_lock_irqsave(&event_handler->device->event_handler_lock, flags);
+	down_write(&event_handler->device->event_handler_rwsem);
 	list_add_tail(&event_handler->list,
 		      &event_handler->device->event_handler_list);
-	spin_unlock_irqrestore(&event_handler->device->event_handler_lock, flags);
+	up_write(&event_handler->device->event_handler_rwsem);
 }
 EXPORT_SYMBOL(ib_register_event_handler);
 
@@ -1944,35 +1977,87 @@ EXPORT_SYMBOL(ib_register_event_handler);
  */
 void ib_unregister_event_handler(struct ib_event_handler *event_handler)
 {
-	unsigned long flags;
-
-	spin_lock_irqsave(&event_handler->device->event_handler_lock, flags);
+	down_write(&event_handler->device->event_handler_rwsem);
 	list_del(&event_handler->list);
-	spin_unlock_irqrestore(&event_handler->device->event_handler_lock, flags);
+	up_write(&event_handler->device->event_handler_rwsem);
 }
 EXPORT_SYMBOL(ib_unregister_event_handler);
 
-/**
- * ib_dispatch_event - Dispatch an asynchronous event
- * @event:Event to dispatch
- *
- * Low-level drivers must call ib_dispatch_event() to dispatch the
- * event to all registered event handlers when an asynchronous event
- * occurs.
- */
-void ib_dispatch_event(struct ib_event *event)
+void ib_dispatch_event_clients(struct ib_event *event)
 {
-	unsigned long flags;
 	struct ib_event_handler *handler;
 
-	spin_lock_irqsave(&event->device->event_handler_lock, flags);
+	down_read(&event->device->event_handler_rwsem);
 
 	list_for_each_entry(handler, &event->device->event_handler_list, list)
 		handler->handler(handler, event);
 
-	spin_unlock_irqrestore(&event->device->event_handler_lock, flags);
+	up_read(&event->device->event_handler_rwsem);
 }
-EXPORT_SYMBOL(ib_dispatch_event);
+
+static int iw_query_port(struct ib_device *device,
+			   u8 port_num,
+			   struct ib_port_attr *port_attr)
+{
+	struct in_device *inetdev;
+	struct net_device *netdev;
+
+	memset(port_attr, 0, sizeof(*port_attr));
+
+	netdev = ib_device_get_netdev(device, port_num);
+	if (!netdev)
+		return -ENODEV;
+
+	port_attr->max_mtu = IB_MTU_4096;
+	port_attr->active_mtu = ib_mtu_int_to_enum(netdev->mtu);
+
+	if (!netif_carrier_ok(netdev)) {
+		port_attr->state = IB_PORT_DOWN;
+		port_attr->phys_state = IB_PORT_PHYS_STATE_DISABLED;
+	} else {
+		rcu_read_lock();
+		inetdev = __in_dev_get_rcu(netdev);
+
+		if (inetdev && inetdev->ifa_list) {
+			port_attr->state = IB_PORT_ACTIVE;
+			port_attr->phys_state = IB_PORT_PHYS_STATE_LINK_UP;
+		} else {
+			port_attr->state = IB_PORT_INIT;
+			port_attr->phys_state =
+				IB_PORT_PHYS_STATE_PORT_CONFIGURATION_TRAINING;
+		}
+
+		rcu_read_unlock();
+	}
+
+	dev_put(netdev);
+	return device->ops.query_port(device, port_num, port_attr);
+}
+
+static int __ib_query_port(struct ib_device *device,
+			   u8 port_num,
+			   struct ib_port_attr *port_attr)
+{
+	union ib_gid gid = {};
+	int err;
+
+	memset(port_attr, 0, sizeof(*port_attr));
+
+	err = device->ops.query_port(device, port_num, port_attr);
+	if (err || port_attr->subnet_prefix)
+		return err;
+
+	if (rdma_port_get_link_layer(device, port_num) !=
+	    IB_LINK_LAYER_INFINIBAND)
+		return 0;
+
+	err = device->ops.query_gid(device, port_num, 0, &gid);
+	if (err)
+		return err;
+
+	port_attr->subnet_prefix = be64_to_cpu(gid.global.subnet_prefix);
+	return 0;
+}
 
 /**
  * ib_query_port - Query IB port attributes
@@ -1987,26 +2072,13 @@ int ib_query_port(struct ib_device *device,
 		  u8 port_num,
 		  struct ib_port_attr *port_attr)
 {
-	union ib_gid gid;
-	int err;
-
 	if (!rdma_is_port_valid(device, port_num))
 		return -EINVAL;
 
-	memset(port_attr, 0, sizeof(*port_attr));
-	err = device->ops.query_port(device, port_num, port_attr);
-	if (err || port_attr->subnet_prefix)
-		return err;
-
-	if (rdma_port_get_link_layer(device, port_num) != IB_LINK_LAYER_INFINIBAND)
-		return 0;
-
-	err = device->ops.query_gid(device, port_num, 0, &gid);
-	if (err)
-		return err;
-
-	port_attr->subnet_prefix = be64_to_cpu(gid.global.subnet_prefix);
-	return 0;
+	if (rdma_protocol_iwarp(device, port_num))
+		return iw_query_port(device, port_num, port_attr);
+	else
+		return __ib_query_port(device, port_num, port_attr);
 }
 EXPORT_SYMBOL(ib_query_port);
 
@@ -2293,6 +2365,9 @@ int ib_query_pkey(struct ib_device *device,
 	if (!rdma_is_port_valid(device, port_num))
 		return -EINVAL;
 
+	if (!device->ops.query_pkey)
+		return -EOPNOTSUPP;
+
 	return device->ops.query_pkey(device, port_num, index, pkey);
 }
 EXPORT_SYMBOL(ib_query_pkey);
@@ -2311,7 +2386,7 @@ int ib_modify_device(struct ib_device *device,
 		     struct ib_device_modify *device_modify)
 {
 	if (!device->ops.modify_device)
-		return -ENOSYS;
+		return -EOPNOTSUPP;
 
 	return device->ops.modify_device(device, device_modify_mask,
 					 device_modify);
@@ -2342,8 +2417,12 @@ int ib_modify_port(struct ib_device *device,
 		rc = device->ops.modify_port(device, port_num,
 					     port_modify_mask,
 					     port_modify);
+	else if (rdma_protocol_roce(device, port_num) &&
+		 ((port_modify->set_port_cap_mask & ~IB_PORT_CM_SUP) == 0 ||
+		  (port_modify->clr_port_cap_mask & ~IB_PORT_CM_SUP) == 0))
+		rc = 0;
 	else
-		rc = rdma_protocol_roce(device, port_num) ? 0 : -ENOSYS;
+		rc = -EOPNOTSUPP;
 	return rc;
 }
 EXPORT_SYMBOL(ib_modify_port);
@@ -2503,7 +2582,6 @@ void ib_set_device_ops(struct ib_device *dev, const struct ib_device_ops *ops)
 	SET_DEVICE_OP(dev_ops, add_gid);
 	SET_DEVICE_OP(dev_ops, advise_mr);
 	SET_DEVICE_OP(dev_ops, alloc_dm);
-	SET_DEVICE_OP(dev_ops, alloc_fmr);
 	SET_DEVICE_OP(dev_ops, alloc_hw_stats);
 	SET_DEVICE_OP(dev_ops, alloc_mr);
 	SET_DEVICE_OP(dev_ops, alloc_mr_integrity);
@@ -2530,7 +2608,6 @@ void ib_set_device_ops(struct ib_device *dev, const struct ib_device_ops *ops)
 	SET_DEVICE_OP(dev_ops, create_wq);
 	SET_DEVICE_OP(dev_ops, dealloc_dm);
 	SET_DEVICE_OP(dev_ops, dealloc_driver);
-	SET_DEVICE_OP(dev_ops, dealloc_fmr);
 	SET_DEVICE_OP(dev_ops, dealloc_mw);
 	SET_DEVICE_OP(dev_ops, dealloc_pd);
 	SET_DEVICE_OP(dev_ops, dealloc_ucontext);
@@ -2551,7 +2628,14 @@ void ib_set_device_ops(struct ib_device *dev, const struct ib_device_ops *ops)
 	SET_DEVICE_OP(dev_ops, drain_rq);
 	SET_DEVICE_OP(dev_ops, drain_sq);
 	SET_DEVICE_OP(dev_ops, enable_driver);
-	SET_DEVICE_OP(dev_ops, fill_res_entry);
+	SET_DEVICE_OP(dev_ops, fill_res_cm_id_entry);
+	SET_DEVICE_OP(dev_ops, fill_res_cq_entry);
+	SET_DEVICE_OP(dev_ops, fill_res_cq_entry_raw);
+	SET_DEVICE_OP(dev_ops, fill_res_mr_entry);
+	SET_DEVICE_OP(dev_ops, fill_res_mr_entry_raw);
+	SET_DEVICE_OP(dev_ops, fill_res_qp_entry);
+	SET_DEVICE_OP(dev_ops, fill_res_qp_entry_raw);
+	SET_DEVICE_OP(dev_ops, fill_stat_mr_entry);
 	SET_DEVICE_OP(dev_ops, get_dev_fw_str);
 	SET_DEVICE_OP(dev_ops, get_dma_mr);
 	SET_DEVICE_OP(dev_ops, get_hw_stats);
@@ -2560,6 +2644,7 @@ void ib_set_device_ops(struct ib_device *dev, const struct ib_device_ops *ops)
 	SET_DEVICE_OP(dev_ops, get_port_immutable);
 	SET_DEVICE_OP(dev_ops, get_vector_affinity);
 	SET_DEVICE_OP(dev_ops, get_vf_config);
+	SET_DEVICE_OP(dev_ops, get_vf_guid);
 	SET_DEVICE_OP(dev_ops, get_vf_stats);
 	SET_DEVICE_OP(dev_ops, init_port);
 	SET_DEVICE_OP(dev_ops, iw_accept);
@@ -2572,8 +2657,8 @@ void ib_set_device_ops(struct ib_device *dev, const struct ib_device_ops *ops)
 	SET_DEVICE_OP(dev_ops, iw_rem_ref);
 	SET_DEVICE_OP(dev_ops, map_mr_sg);
 	SET_DEVICE_OP(dev_ops, map_mr_sg_pi);
-	SET_DEVICE_OP(dev_ops, map_phys_fmr);
 	SET_DEVICE_OP(dev_ops, mmap);
+	SET_DEVICE_OP(dev_ops, mmap_free);
 	SET_DEVICE_OP(dev_ops, modify_ah);
 	SET_DEVICE_OP(dev_ops, modify_cq);
 	SET_DEVICE_OP(dev_ops, modify_device);
@@ -2595,6 +2680,7 @@ void ib_set_device_ops(struct ib_device *dev, const struct ib_device_ops *ops)
 	SET_DEVICE_OP(dev_ops, query_port);
 	SET_DEVICE_OP(dev_ops, query_qp);
 	SET_DEVICE_OP(dev_ops, query_srq);
+	SET_DEVICE_OP(dev_ops, query_ucontext);
 	SET_DEVICE_OP(dev_ops, rdma_netdev_get_params);
 	SET_DEVICE_OP(dev_ops, read_counters);
 	SET_DEVICE_OP(dev_ops, reg_dm_mr);
@@ -2605,13 +2691,14 @@ void ib_set_device_ops(struct ib_device *dev, const struct ib_device_ops *ops)
 	SET_DEVICE_OP(dev_ops, resize_cq);
 	SET_DEVICE_OP(dev_ops, set_vf_guid);
 	SET_DEVICE_OP(dev_ops, set_vf_link_state);
-	SET_DEVICE_OP(dev_ops, unmap_fmr);
 
 	SET_OBJ_SIZE(dev_ops, ib_ah);
+	SET_OBJ_SIZE(dev_ops, ib_counters);
 	SET_OBJ_SIZE(dev_ops, ib_cq);
 	SET_OBJ_SIZE(dev_ops, ib_pd);
 	SET_OBJ_SIZE(dev_ops, ib_srq);
 	SET_OBJ_SIZE(dev_ops, ib_ucontext);
+	SET_OBJ_SIZE(dev_ops, ib_xrcd);
 }
 EXPORT_SYMBOL(ib_set_device_ops);
 
@@ -2660,15 +2747,11 @@ static int __init ib_core_init(void)
 		goto err_comp_unbound;
 	}
 
-	ret = rdma_nl_init();
-	if (ret) {
-		pr_warn("Couldn't init IB netlink interface: err %d\n", ret);
-		goto err_sysfs;
-	}
+	rdma_nl_init();
 
 	ret = addr_init();
 	if (ret) {
-		pr_warn("Could't init IB address resolution\n");
+		pr_warn("Couldn't init IB address resolution\n");
 		goto err_ibnl;
 	}
 
@@ -2711,8 +2794,6 @@ err_mad:
 err_addr:
 	addr_cleanup();
 err_ibnl:
-	rdma_nl_exit();
-err_sysfs:
 	class_unregister(&ib_class);
 err_comp_unbound:
 	destroy_workqueue(ib_comp_unbound_wq);

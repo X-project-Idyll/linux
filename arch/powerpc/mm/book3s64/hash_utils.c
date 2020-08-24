@@ -34,10 +34,11 @@
 #include <linux/libfdt.h>
 #include <linux/pkeys.h>
 #include <linux/hugetlb.h>
+#include <linux/cpu.h>
+#include <linux/pgtable.h>
 
 #include <asm/debugfs.h>
 #include <asm/processor.h>
-#include <asm/pgtable.h>
 #include <asm/mmu.h>
 #include <asm/mmu_context.h>
 #include <asm/page.h>
@@ -61,8 +62,12 @@
 #include <asm/ps3.h>
 #include <asm/pte-walk.h>
 #include <asm/asm-prototypes.h>
+#include <asm/ultravisor.h>
 
 #include <mm/mmu_decl.h>
+
+#include "internal.h"
+
 
 #ifdef DEBUG
 #define DBG(fmt...) udbg_printf(fmt)
@@ -227,8 +232,6 @@ unsigned long htab_convert_pte_flags(unsigned long pteflags)
 		rflags |= HPTE_R_I;
 	else if ((pteflags & _PAGE_CACHE_CTL) == _PAGE_NON_IDEMPOTENT)
 		rflags |= (HPTE_R_I | HPTE_R_G);
-	else if ((pteflags & _PAGE_CACHE_CTL) == _PAGE_SAO)
-		rflags |= (HPTE_R_W | HPTE_R_I | HPTE_R_M);
 	else
 		/*
 		 * Add memory coherence if cache inhibited is not set
@@ -261,6 +264,7 @@ int htab_bolt_mapping(unsigned long vstart, unsigned long vend,
 		unsigned long vsid = get_kernel_vsid(vaddr, ssize);
 		unsigned long vpn  = hpt_vpn(vaddr, vsid, ssize);
 		unsigned long tprot = prot;
+		bool secondary_hash = false;
 
 		/*
 		 * If we hit a bad address return error.
@@ -269,10 +273,6 @@ int htab_bolt_mapping(unsigned long vstart, unsigned long vend,
 			return -1;
 		/* Make kernel text executable */
 		if (overlaps_kernel_text(vaddr, vaddr + step))
-			tprot &= ~HPTE_R_N;
-
-		/* Make kvm guest trampolines executable */
-		if (overlaps_kvm_tmp(vaddr, vaddr + step))
 			tprot &= ~HPTE_R_N;
 
 		/*
@@ -293,13 +293,31 @@ int htab_bolt_mapping(unsigned long vstart, unsigned long vend,
 		hpteg = ((hash & htab_hash_mask) * HPTES_PER_GROUP);
 
 		BUG_ON(!mmu_hash_ops.hpte_insert);
+repeat:
 		ret = mmu_hash_ops.hpte_insert(hpteg, vpn, paddr, tprot,
 					       HPTE_V_BOLTED, psize, psize,
 					       ssize);
+		if (ret == -1) {
+			/*
+			 * Try to to keep bolted entries in primary.
+			 * Remove non bolted entries and try insert again
+			 */
+			ret = mmu_hash_ops.hpte_remove(hpteg);
+			if (ret != -1)
+				ret = mmu_hash_ops.hpte_insert(hpteg, vpn, paddr, tprot,
+							       HPTE_V_BOLTED, psize, psize,
+							       ssize);
+			if (ret == -1 && !secondary_hash) {
+				secondary_hash = true;
+				hpteg = ((~hash & htab_hash_mask) * HPTES_PER_GROUP);
+				goto repeat;
+			}
+		}
 
 		if (ret < 0)
 			break;
 
+		cond_resched();
 #ifdef CONFIG_DEBUG_PAGEALLOC
 		if (debug_pagealloc_enabled() &&
 			(paddr >> PAGE_SHIFT) < linear_map_hash_count)
@@ -576,7 +594,7 @@ static void __init htab_scan_page_sizes(void)
 	}
 
 #ifdef CONFIG_HUGETLB_PAGE
-	if (!hugetlb_disabled) {
+	if (!hugetlb_disabled && !early_radix_enabled() ) {
 		/* Reserve 16G huge page memory sections for huge pages */
 		of_scan_flat_dt(htab_dt_scan_hugepage_blocks, NULL);
 	}
@@ -635,6 +653,7 @@ static void init_hpte_page_sizes(void)
 
 static void __init htab_init_page_sizes(void)
 {
+	bool aligned = true;
 	init_hpte_page_sizes();
 
 	if (!debug_pagealloc_enabled()) {
@@ -642,7 +661,14 @@ static void __init htab_init_page_sizes(void)
 		 * Pick a size for the linear mapping. Currently, we only
 		 * support 16M, 1M and 4K which is the default
 		 */
-		if (mmu_psize_defs[MMU_PAGE_16M].shift)
+		if (IS_ENABLED(CONFIG_STRICT_KERNEL_RWX) &&
+		    (unsigned long)_stext % 0x1000000) {
+			if (mmu_psize_defs[MMU_PAGE_16M].shift)
+				pr_warn("Kernel not 16M aligned, disabling 16M linear map alignment\n");
+			aligned = false;
+		}
+
+		if (mmu_psize_defs[MMU_PAGE_16M].shift && aligned)
 			mmu_linear_psize = MMU_PAGE_16M;
 		else if (mmu_psize_defs[MMU_PAGE_1M].shift)
 			mmu_linear_psize = MMU_PAGE_1M;
@@ -759,7 +785,7 @@ static unsigned long __init htab_get_table_size(void)
 }
 
 #ifdef CONFIG_MEMORY_HOTPLUG
-int resize_hpt_for_hotplug(unsigned long new_mem_size)
+static int resize_hpt_for_hotplug(unsigned long new_mem_size)
 {
 	unsigned target_hpt_shift;
 
@@ -783,7 +809,8 @@ int resize_hpt_for_hotplug(unsigned long new_mem_size)
 	return 0;
 }
 
-int hash__create_section_mapping(unsigned long start, unsigned long end, int nid)
+int hash__create_section_mapping(unsigned long start, unsigned long end,
+				 int nid, pgprot_t prot)
 {
 	int rc;
 
@@ -792,8 +819,10 @@ int hash__create_section_mapping(unsigned long start, unsigned long end, int nid
 		return -1;
 	}
 
+	resize_hpt_for_hotplug(memblock_phys_mem_size());
+
 	rc = htab_bolt_mapping(start, end, __pa(start),
-			       pgprot_val(PAGE_KERNEL), mmu_linear_psize,
+			       pgprot_val(prot), mmu_linear_psize,
 			       mmu_kernel_ssize);
 
 	if (rc < 0) {
@@ -809,6 +838,10 @@ int hash__remove_section_mapping(unsigned long start, unsigned long end)
 	int rc = htab_remove_mapping(start, end, mmu_linear_psize,
 				     mmu_kernel_ssize);
 	WARN_ON(rc < 0);
+
+	if (resize_hpt_for_hotplug(memblock_phys_mem_size()) == -ENOSPC)
+		pr_warn("Hash collision while resizing HPT\n");
+
 	return rc;
 }
 #endif /* CONFIG_MEMORY_HOTPLUG */
@@ -823,7 +856,7 @@ static void __init hash_init_partition_table(phys_addr_t hash_table,
 	 * For now, UPRT is 0 and we have no segment table.
 	 */
 	htab_size =  __ilog2(htab_size) - 18;
-	mmu_partition_table_set_entry(0, hash_table | htab_size, 0);
+	mmu_partition_table_set_entry(0, hash_table | htab_size, 0, false);
 	pr_info("Partition table %p\n", partition_tb);
 }
 
@@ -843,6 +876,9 @@ static void __init htab_initialize(void)
 		printk(KERN_INFO "Using 1TB segments\n");
 	}
 
+	if (stress_slb_enabled)
+		static_branch_enable(&stress_slb_key);
+
 	/*
 	 * Calculate the required size of the htab.  We want the number of
 	 * PTEGs to equal one half the number of real pages.
@@ -857,12 +893,6 @@ static void __init htab_initialize(void)
 		/* Using a hypervisor which owns the htab */
 		htab_address = NULL;
 		_SDR1 = 0; 
-		/*
-		 * On POWER9, we need to do a H_REGISTER_PROC_TBL hcall
-		 * to inform the hypervisor that we wish to use the HPT.
-		 */
-		if (cpu_has_feature(CPU_FTR_ARCH_300))
-			register_process_table(0, 0, 0);
 #ifdef CONFIG_FA_DUMP
 		/*
 		 * If firmware assisted dump is active firmware preserves
@@ -1075,8 +1105,8 @@ void hash__early_init_mmu_secondary(void)
 		if (!cpu_has_feature(CPU_FTR_ARCH_300))
 			mtspr(SPRN_SDR1, _SDR1);
 		else
-			mtspr(SPRN_PTCR,
-			      __pa(partition_tb) | (PATB_SIZE_SHIFT - 12));
+			set_ptcr_when_no_uv(__pa(partition_tb) |
+					    (PATB_SIZE_SHIFT - 12));
 	}
 	/* Initialize SLB */
 	slb_initialize();
@@ -1084,6 +1114,11 @@ void hash__early_init_mmu_secondary(void)
 	if (cpu_has_feature(CPU_FTR_ARCH_206)
 			&& cpu_has_feature(CPU_FTR_HVMODE))
 		tlbiel_all();
+
+#ifdef CONFIG_PPC_MEM_KEYS
+	if (mmu_has_feature(MMU_FTR_PKEY))
+		mtspr(SPRN_UAMOR, default_uamor);
+#endif
 }
 #endif /* CONFIG_SMP */
 
@@ -1329,8 +1364,15 @@ int hash_page_mm(struct mm_struct *mm, unsigned long ea,
 		goto bail;
 	}
 
-	/* Add _PAGE_PRESENT to the required access perm */
-	access |= _PAGE_PRESENT;
+	/*
+	 * Add _PAGE_PRESENT to the required access perm. If there are parallel
+	 * updates to the pte that can possibly clear _PAGE_PTE, catch that too.
+	 *
+	 * We can safely use the return pte address in rest of the function
+	 * because we do set H_PAGE_BUSY which prevents further updates to pte
+	 * from generic code.
+	 */
+	access |= _PAGE_PRESENT | _PAGE_PTE;
 
 	/*
 	 * Pre-check access permissions (will be re-checked atomically
@@ -1460,8 +1502,8 @@ int hash_page(unsigned long ea, unsigned long access, unsigned long trap,
 }
 EXPORT_SYMBOL_GPL(hash_page);
 
-int __hash_page(unsigned long ea, unsigned long msr, unsigned long trap,
-		unsigned long dsisr)
+int __hash_page(unsigned long trap, unsigned long ea, unsigned long dsisr,
+		unsigned long msr)
 {
 	unsigned long access = _PAGE_PRESENT | _PAGE_READ;
 	unsigned long flags = 0;
@@ -1518,16 +1560,14 @@ static bool should_hash_preload(struct mm_struct *mm, unsigned long ea)
 }
 #endif
 
-void hash_preload(struct mm_struct *mm, unsigned long ea,
-		  bool is_exec, unsigned long trap)
+static void hash_preload(struct mm_struct *mm, pte_t *ptep, unsigned long ea,
+			 bool is_exec, unsigned long trap)
 {
-	int hugepage_shift;
 	unsigned long vsid;
 	pgd_t *pgdir;
-	pte_t *ptep;
-	unsigned long flags;
 	int rc, ssize, update_flags = 0;
 	unsigned long access = _PAGE_PRESENT | _PAGE_READ | (is_exec ? _PAGE_EXEC : 0);
+	unsigned long flags;
 
 	BUG_ON(get_region_id(ea) != USER_REGION_ID);
 
@@ -1547,31 +1587,41 @@ void hash_preload(struct mm_struct *mm, unsigned long ea,
 	vsid = get_user_vsid(&mm->context, ea, ssize);
 	if (!vsid)
 		return;
-	/*
-	 * Hash doesn't like irqs. Walking linux page table with irq disabled
-	 * saves us from holding multiple locks.
-	 */
-	local_irq_save(flags);
 
-	/*
-	 * THP pages use update_mmu_cache_pmd. We don't do
-	 * hash preload there. Hence can ignore THP here
-	 */
-	ptep = find_current_mm_pte(pgdir, ea, NULL, &hugepage_shift);
-	if (!ptep)
-		goto out_exit;
-
-	WARN_ON(hugepage_shift);
 #ifdef CONFIG_PPC_64K_PAGES
 	/* If either H_PAGE_4K_PFN or cache inhibited is set (and we are on
 	 * a 64K kernel), then we don't preload, hash_page() will take
 	 * care of it once we actually try to access the page.
 	 * That way we don't have to duplicate all of the logic for segment
 	 * page size demotion here
+	 * Called with  PTL held, hence can be sure the value won't change in
+	 * between.
 	 */
 	if ((pte_val(*ptep) & H_PAGE_4K_PFN) || pte_ci(*ptep))
-		goto out_exit;
+		return;
 #endif /* CONFIG_PPC_64K_PAGES */
+
+	/*
+	 * __hash_page_* must run with interrupts off, as it sets the
+	 * H_PAGE_BUSY bit. It's possible for perf interrupts to hit at any
+	 * time and may take a hash fault reading the user stack, see
+	 * read_user_stack_slow() in the powerpc/perf code.
+	 *
+	 * If that takes a hash fault on the same page as we lock here, it
+	 * will bail out when seeing H_PAGE_BUSY set, and retry the access
+	 * leading to an infinite loop.
+	 *
+	 * Disabling interrupts here does not prevent perf interrupts, but it
+	 * will prevent them taking hash faults (see the NMI test in
+	 * do_hash_page), then read_user_stack's copy_from_user_nofault will
+	 * fail and perf will fall back to read_user_stack_slow(), which
+	 * walks the Linux page tables.
+	 *
+	 * Interrupts must also be off for the duration of the
+	 * mm_is_thread_local test and update, to prevent preempt running the
+	 * mm on another CPU (XXX: this may be racy vs kthread_use_mm).
+	 */
+	local_irq_save(flags);
 
 	/* Is that local to this CPU ? */
 	if (mm_is_thread_local(mm))
@@ -1595,33 +1645,58 @@ void hash_preload(struct mm_struct *mm, unsigned long ea,
 				   mm_ctx_user_psize(&mm->context),
 				   mm_ctx_user_psize(&mm->context),
 				   pte_val(*ptep));
-out_exit:
+
 	local_irq_restore(flags);
 }
 
-#ifdef CONFIG_PPC_MEM_KEYS
 /*
- * Return the protection key associated with the given address and the
- * mm_struct.
+ * This is called at the end of handling a user page fault, when the
+ * fault has been handled by updating a PTE in the linux page tables.
+ * We use it to preload an HPTE into the hash table corresponding to
+ * the updated linux PTE.
+ *
+ * This must always be called with the pte lock held.
  */
-u16 get_mm_addr_key(struct mm_struct *mm, unsigned long address)
+void update_mmu_cache(struct vm_area_struct *vma, unsigned long address,
+		      pte_t *ptep)
 {
-	pte_t *ptep;
-	u16 pkey = 0;
-	unsigned long flags;
+	/*
+	 * We don't need to worry about _PAGE_PRESENT here because we are
+	 * called with either mm->page_table_lock held or ptl lock held
+	 */
+	unsigned long trap;
+	bool is_exec;
 
-	if (!mm || !mm->pgd)
-		return 0;
+	if (radix_enabled())
+		return;
 
-	local_irq_save(flags);
-	ptep = find_linux_pte(mm->pgd, address, NULL, NULL);
-	if (ptep)
-		pkey = pte_to_pkey_bits(pte_val(READ_ONCE(*ptep)));
-	local_irq_restore(flags);
+	/* We only want HPTEs for linux PTEs that have _PAGE_ACCESSED set */
+	if (!pte_young(*ptep) || address >= TASK_SIZE)
+		return;
 
-	return pkey;
+	/*
+	 * We try to figure out if we are coming from an instruction
+	 * access fault and pass that down to __hash_page so we avoid
+	 * double-faulting on execution of fresh text. We have to test
+	 * for regs NULL since init will get here first thing at boot.
+	 *
+	 * We also avoid filling the hash if not coming from a fault.
+	 */
+
+	trap = current->thread.regs ? TRAP(current->thread.regs) : 0UL;
+	switch (trap) {
+	case 0x300:
+		is_exec = false;
+		break;
+	case 0x400:
+		is_exec = true;
+		break;
+	default:
+		return;
+	}
+
+	hash_preload(vma->vm_mm, ptep, address, is_exec, trap);
 }
-#endif /* CONFIG_PPC_MEM_KEYS */
 
 #ifdef CONFIG_PPC_TRANSACTIONAL_MEM
 static inline void tm_flush_hash_page(int local)
@@ -1664,10 +1739,6 @@ unsigned long pte_get_hash_gslot(unsigned long vpn, unsigned long shift,
 	return gslot;
 }
 
-/*
- * WARNING: This is called from hash_low_64.S, if you change this prototype,
- *          do not forget to update the assembly call site !
- */
 void flush_hash_page(unsigned long vpn, real_pte_t pte, int psize, int ssize,
 		     unsigned long flags)
 {
@@ -1705,7 +1776,7 @@ void flush_hash_hugepage(unsigned long vsid, unsigned long addr,
 	/*
 	 * IF we try to do a HUGE PTE update after a withdraw is done.
 	 * we will find the below NULL. This happens when we do
-	 * split_huge_page_pmd
+	 * split_huge_pmd
 	 */
 	if (!hpte_slot_array)
 		return;
@@ -1931,21 +2002,24 @@ static int hpt_order_get(void *data, u64 *val)
 
 static int hpt_order_set(void *data, u64 val)
 {
+	int ret;
+
 	if (!mmu_hash_ops.resize_hpt)
 		return -ENODEV;
 
-	return mmu_hash_ops.resize_hpt(val);
+	cpus_read_lock();
+	ret = mmu_hash_ops.resize_hpt(val);
+	cpus_read_unlock();
+
+	return ret;
 }
 
 DEFINE_DEBUGFS_ATTRIBUTE(fops_hpt_order, hpt_order_get, hpt_order_set, "%llu\n");
 
 static int __init hash64_debugfs(void)
 {
-	if (!debugfs_create_file_unsafe("hpt_order", 0600, powerpc_debugfs_root,
-					NULL, &fops_hpt_order)) {
-		pr_err("lpar: unable to create hpt_order debugsfs file\n");
-	}
-
+	debugfs_create_file("hpt_order", 0600, powerpc_debugfs_root, NULL,
+			    &fops_hpt_order);
 	return 0;
 }
 machine_device_initcall(pseries, hash64_debugfs);
@@ -1957,7 +2031,4 @@ void __init print_system_hash_info(void)
 
 	if (htab_hash_mask)
 		pr_info("htab_hash_mask    = 0x%lx\n", htab_hash_mask);
-	pr_info("kernel vmalloc start   = 0x%lx\n", KERN_VIRT_START);
-	pr_info("kernel IO start        = 0x%lx\n", KERN_IO_START);
-	pr_info("kernel vmemmap start   = 0x%lx\n", (unsigned long)vmemmap);
 }

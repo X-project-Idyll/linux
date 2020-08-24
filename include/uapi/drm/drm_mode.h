@@ -361,6 +361,7 @@ enum drm_mode_subconnector {
 #define DRM_MODE_CONNECTOR_DSI		16
 #define DRM_MODE_CONNECTOR_DPI		17
 #define DRM_MODE_CONNECTOR_WRITEBACK	18
+#define DRM_MODE_CONNECTOR_SPI		19
 
 struct drm_mode_get_connector {
 
@@ -496,7 +497,7 @@ struct drm_mode_fb_cmd2 {
 	 * In case of planar formats, this ioctl allows up to 4
 	 * buffer objects with offsets and pitches per plane.
 	 * The pitch and offset order is dictated by the fourcc,
-	 * e.g. NV12 (http://fourcc.org/yuv.php#NV12) is described as:
+	 * e.g. NV12 (https://fourcc.org/yuv.php#NV12) is described as:
 	 *
 	 *   YUV 4:2:0 image with a plane of 8 bit Y samples
 	 *   followed by an interleaved U/V plane containing

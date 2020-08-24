@@ -107,11 +107,11 @@ static struct severity {
 	 */
 	MCESEV(
 		AO, "Action optional: memory scrubbing error",
-		SER, MASK(MCI_STATUS_OVER|MCI_UC_AR|MCACOD_SCRUBMSK, MCI_STATUS_UC|MCACOD_SCRUB)
+		SER, MASK(MCI_UC_AR|MCACOD_SCRUBMSK, MCI_STATUS_UC|MCACOD_SCRUB)
 		),
 	MCESEV(
 		AO, "Action optional: last level cache writeback error",
-		SER, MASK(MCI_STATUS_OVER|MCI_UC_AR|MCACOD, MCI_STATUS_UC|MCACOD_L3WB)
+		SER, MASK(MCI_UC_AR|MCACOD, MCI_STATUS_UC|MCACOD_L3WB)
 		),
 
 	/* ignore OVER for UCNA */
@@ -213,8 +213,12 @@ static int error_context(struct mce *m)
 {
 	if ((m->cs & 3) == 3)
 		return IN_USER;
-	if (mc_recoverable(m->mcgstatus) && ex_has_fault_handler(m->ip))
+
+	if (mc_recoverable(m->mcgstatus) && ex_has_fault_handler(m->ip)) {
+		m->kflags |= MCE_IN_KERNEL_RECOV;
 		return IN_KERNEL_RECOV;
+	}
+
 	return IN_KERNEL;
 }
 

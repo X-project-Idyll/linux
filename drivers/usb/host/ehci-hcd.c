@@ -982,7 +982,7 @@ rescan:
 			start_unlink_async(ehci, qh);
 		else
 			start_unlink_intr(ehci, qh);
-		/* FALL THROUGH */
+		fallthrough;
 	case QH_STATE_COMPLETING:	/* already in unlinking */
 	case QH_STATE_UNLINK:		/* wait for hw to finish? */
 	case QH_STATE_UNLINK_WAIT:
@@ -999,7 +999,7 @@ idle_timeout:
 			qh_destroy(ehci, qh);
 			break;
 		}
-		/* fall through */
+		fallthrough;
 	default:
 		/* caller was supposed to have unlinked any requests;
 		 * that's not our job.  just leak this memory.
@@ -1193,7 +1193,7 @@ static const struct hc_driver ehci_hc_driver = {
 	 * generic hardware linkage
 	 */
 	.irq =			ehci_irq,
-	.flags =		HCD_MEMORY | HCD_USB2 | HCD_BH,
+	.flags =		HCD_MEMORY | HCD_DMA | HCD_USB2 | HCD_BH,
 
 	/*
 	 * basic lifecycle operations

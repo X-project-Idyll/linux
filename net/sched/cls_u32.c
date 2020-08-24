@@ -480,7 +480,7 @@ static void u32_clear_hw_hnode(struct tcf_proto *tp, struct tc_u_hnode *h,
 	cls_u32.hnode.handle = h->handle;
 	cls_u32.hnode.prio = h->prio;
 
-	tc_setup_cb_call(block, TC_SETUP_CLSU32, &cls_u32, false);
+	tc_setup_cb_call(block, TC_SETUP_CLSU32, &cls_u32, false, true);
 }
 
 static int u32_replace_hw_hnode(struct tcf_proto *tp, struct tc_u_hnode *h,
@@ -498,7 +498,7 @@ static int u32_replace_hw_hnode(struct tcf_proto *tp, struct tc_u_hnode *h,
 	cls_u32.hnode.handle = h->handle;
 	cls_u32.hnode.prio = h->prio;
 
-	err = tc_setup_cb_call(block, TC_SETUP_CLSU32, &cls_u32, skip_sw);
+	err = tc_setup_cb_call(block, TC_SETUP_CLSU32, &cls_u32, skip_sw, true);
 	if (err < 0) {
 		u32_clear_hw_hnode(tp, h, NULL);
 		return err;
@@ -522,8 +522,8 @@ static void u32_remove_hw_knode(struct tcf_proto *tp, struct tc_u_knode *n,
 	cls_u32.command = TC_CLSU32_DELETE_KNODE;
 	cls_u32.knode.handle = n->handle;
 
-	tc_setup_cb_call(block, TC_SETUP_CLSU32, &cls_u32, false);
-	tcf_block_offload_dec(block, &n->flags);
+	tc_setup_cb_destroy(block, tp, TC_SETUP_CLSU32, &cls_u32, false,
+			    &n->flags, &n->in_hw_count, true);
 }
 
 static int u32_replace_hw_knode(struct tcf_proto *tp, struct tc_u_knode *n,
@@ -552,13 +552,11 @@ static int u32_replace_hw_knode(struct tcf_proto *tp, struct tc_u_knode *n,
 	if (n->ht_down)
 		cls_u32.knode.link_handle = ht->handle;
 
-	err = tc_setup_cb_call(block, TC_SETUP_CLSU32, &cls_u32, skip_sw);
-	if (err < 0) {
+	err = tc_setup_cb_add(block, tp, TC_SETUP_CLSU32, &cls_u32, skip_sw,
+			      &n->flags, &n->in_hw_count, true);
+	if (err) {
 		u32_remove_hw_knode(tp, n, NULL);
 		return err;
-	} else if (err > 0) {
-		n->in_hw_count = err;
-		tcf_block_offload_inc(block, &n->flags);
 	}
 
 	if (skip_sw && !(n->flags & TCA_CLS_FLAGS_IN_HW))
@@ -798,9 +796,7 @@ static struct tc_u_knode *u32_init_knode(struct net *net, struct tcf_proto *tp,
 	struct tc_u32_sel *s = &n->sel;
 	struct tc_u_knode *new;
 
-	new = kzalloc(sizeof(*n) + s->nkeys*sizeof(struct tc_u32_key),
-		      GFP_KERNEL);
-
+	new = kzalloc(struct_size(new, sel.keys, s->nkeys), GFP_KERNEL);
 	if (!new)
 		return NULL;
 
@@ -856,9 +852,6 @@ static int u32_change(struct net *net, struct sk_buff *in_skb,
 	u32 htid, flags = 0;
 	size_t sel_size;
 	int err;
-#ifdef CONFIG_CLS_U32_PERF
-	size_t size;
-#endif
 
 	if (!opt) {
 		if (handle) {
@@ -1026,15 +1019,15 @@ static int u32_change(struct net *net, struct sk_buff *in_skb,
 		goto erridr;
 	}
 
-	n = kzalloc(offsetof(typeof(*n), sel) + sel_size, GFP_KERNEL);
+	n = kzalloc(struct_size(n, sel.keys, s->nkeys), GFP_KERNEL);
 	if (n == NULL) {
 		err = -ENOBUFS;
 		goto erridr;
 	}
 
 #ifdef CONFIG_CLS_U32_PERF
-	size = sizeof(struct tc_u32_pcnt) + s->nkeys * sizeof(u64);
-	n->pf = __alloc_percpu(size, __alignof__(struct tc_u32_pcnt));
+	n->pf = __alloc_percpu(struct_size(n->pf, kcnts, s->nkeys),
+			       __alignof__(struct tc_u32_pcnt));
 	if (!n->pf) {
 		err = -ENOBUFS;
 		goto errfree;
@@ -1201,14 +1194,11 @@ static int u32_reoffload_knode(struct tcf_proto *tp, struct tc_u_knode *n,
 			cls_u32.knode.link_handle = ht->handle;
 	}
 
-	err = cb(TC_SETUP_CLSU32, &cls_u32, cb_priv);
-	if (err) {
-		if (add && tc_skip_sw(n->flags))
-			return err;
-		return 0;
-	}
-
-	tc_cls_offload_cnt_update(block, &n->in_hw_count, &n->flags, add);
+	err = tc_setup_cb_reoffload(block, tp, add, cb, TC_SETUP_CLSU32,
+				    &cls_u32, cb_priv, &n->flags,
+				    &n->in_hw_count);
+	if (err)
+		return err;
 
 	return 0;
 }
@@ -1260,12 +1250,17 @@ static int u32_reoffload(struct tcf_proto *tp, bool add, flow_setup_cb_t *cb,
 	return 0;
 }
 
-static void u32_bind_class(void *fh, u32 classid, unsigned long cl)
+static void u32_bind_class(void *fh, u32 classid, unsigned long cl, void *q,
+			   unsigned long base)
 {
 	struct tc_u_knode *n = fh;
 
-	if (n && n->res.classid == classid)
-		n->res.class = cl;
+	if (n && n->res.classid == classid) {
+		if (cl)
+			__tcf_bind_filter(q, &n->res, base);
+		else
+			__tcf_unbind_filter(q, &n->res);
+	}
 }
 
 static int u32_dump(struct net *net, struct tcf_proto *tp, void *fh,
@@ -1296,8 +1291,7 @@ static int u32_dump(struct net *net, struct tcf_proto *tp, void *fh,
 		int cpu;
 #endif
 
-		if (nla_put(skb, TCA_U32_SEL,
-			    sizeof(n->sel) + n->sel.nkeys*sizeof(struct tc_u32_key),
+		if (nla_put(skb, TCA_U32_SEL, struct_size(&n->sel, keys, n->sel.nkeys),
 			    &n->sel))
 			goto nla_put_failure;
 
@@ -1347,9 +1341,7 @@ static int u32_dump(struct net *net, struct tcf_proto *tp, void *fh,
 				goto nla_put_failure;
 		}
 #ifdef CONFIG_CLS_U32_PERF
-		gpf = kzalloc(sizeof(struct tc_u32_pcnt) +
-			      n->sel.nkeys * sizeof(u64),
-			      GFP_KERNEL);
+		gpf = kzalloc(struct_size(gpf, kcnts, n->sel.nkeys), GFP_KERNEL);
 		if (!gpf)
 			goto nla_put_failure;
 
@@ -1363,9 +1355,7 @@ static int u32_dump(struct net *net, struct tcf_proto *tp, void *fh,
 				gpf->kcnts[i] += pf->kcnts[i];
 		}
 
-		if (nla_put_64bit(skb, TCA_U32_PCNT,
-				  sizeof(struct tc_u32_pcnt) +
-				  n->sel.nkeys * sizeof(u64),
+		if (nla_put_64bit(skb, TCA_U32_PCNT, struct_size(gpf, kcnts, n->sel.nkeys),
 				  gpf, TCA_U32_PAD)) {
 			kfree(gpf);
 			goto nla_put_failure;

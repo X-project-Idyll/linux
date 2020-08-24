@@ -161,8 +161,8 @@ struct hclgevf_query_res_cmd {
 
 #define HCLGEVF_GRO_EN_B               0
 struct hclgevf_cfg_gro_status_cmd {
-	__le16 gro_en;
-	u8 rsv[22];
+	u8 gro_en;
+	u8 rsv[23];
 };
 
 #define HCLGEVF_RSS_DEFAULT_OUTPORT_B	4
@@ -244,8 +244,11 @@ struct hclgevf_cfg_tx_queue_pointer_cmd {
 #define HCLGEVF_NIC_CRQ_DEPTH_REG	0x27020
 #define HCLGEVF_NIC_CRQ_TAIL_REG	0x27024
 #define HCLGEVF_NIC_CRQ_HEAD_REG	0x27028
-#define HCLGEVF_NIC_CMQ_EN_B		16
-#define HCLGEVF_NIC_CMQ_ENABLE		BIT(HCLGEVF_NIC_CMQ_EN_B)
+
+/* this bit indicates that the driver is ready for hardware reset */
+#define HCLGEVF_NIC_SW_RST_RDY_B	16
+#define HCLGEVF_NIC_SW_RST_RDY		BIT(HCLGEVF_NIC_SW_RST_RDY_B)
+
 #define HCLGEVF_NIC_CMQ_DESC_NUM	1024
 #define HCLGEVF_NIC_CMQ_DESC_NUM_S	3
 #define HCLGEVF_NIC_CMDQ_INT_SRC_REG	0x27100

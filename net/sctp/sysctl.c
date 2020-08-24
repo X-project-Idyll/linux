@@ -34,6 +34,8 @@ static int rto_alpha_min = 0;
 static int rto_beta_min = 0;
 static int rto_alpha_max = 1000;
 static int rto_beta_max = 1000;
+static int pf_expose_max = SCTP_PF_EXPOSE_MAX;
+static int ps_retrans_max = SCTP_PS_RETRANS_MAX;
 
 static unsigned long max_autoclose_min = 0;
 static unsigned long max_autoclose_max =
@@ -41,20 +43,15 @@ static unsigned long max_autoclose_max =
 	? UINT_MAX : MAX_SCHEDULE_TIMEOUT / HZ;
 
 static int proc_sctp_do_hmac_alg(struct ctl_table *ctl, int write,
-				void __user *buffer, size_t *lenp,
-				loff_t *ppos);
+				 void *buffer, size_t *lenp, loff_t *ppos);
 static int proc_sctp_do_rto_min(struct ctl_table *ctl, int write,
-				void __user *buffer, size_t *lenp,
-				loff_t *ppos);
-static int proc_sctp_do_rto_max(struct ctl_table *ctl, int write,
-				void __user *buffer, size_t *lenp,
-				loff_t *ppos);
+				void *buffer, size_t *lenp, loff_t *ppos);
+static int proc_sctp_do_rto_max(struct ctl_table *ctl, int write, void *buffer,
+				size_t *lenp, loff_t *ppos);
 static int proc_sctp_do_alpha_beta(struct ctl_table *ctl, int write,
-				   void __user *buffer, size_t *lenp,
-				   loff_t *ppos);
+				   void *buffer, size_t *lenp, loff_t *ppos);
 static int proc_sctp_do_auth(struct ctl_table *ctl, int write,
-			     void __user *buffer, size_t *lenp,
-			     loff_t *ppos);
+			     void *buffer, size_t *lenp, loff_t *ppos);
 
 static struct ctl_table sctp_table[] = {
 	{
@@ -212,7 +209,16 @@ static struct ctl_table sctp_net_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= SYSCTL_ZERO,
-		.extra2		= SYSCTL_INT_MAX,
+		.extra2		= &init_net.sctp.ps_retrans,
+	},
+	{
+		.procname	= "ps_retrans",
+		.data		= &init_net.sctp.ps_retrans,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &init_net.sctp.pf_retrans,
+		.extra2		= &ps_retrans_max,
 	},
 	{
 		.procname	= "sndbuf_policy",
@@ -278,6 +284,13 @@ static struct ctl_table sctp_net_table[] = {
 		.proc_handler	= proc_dointvec,
 	},
 	{
+		.procname	= "ecn_enable",
+		.data		= &init_net.sctp.ecn_enable,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+	{
 		.procname	= "addr_scope_policy",
 		.data		= &init_net.sctp.scope_policy,
 		.maxlen		= sizeof(int),
@@ -311,13 +324,21 @@ static struct ctl_table sctp_net_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
 	},
+	{
+		.procname	= "pf_expose",
+		.data		= &init_net.sctp.pf_expose,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= &pf_expose_max,
+	},
 
 	{ /* sentinel */ }
 };
 
 static int proc_sctp_do_hmac_alg(struct ctl_table *ctl, int write,
-				void __user *buffer, size_t *lenp,
-				loff_t *ppos)
+				 void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct net *net = current->nsproxy->net_ns;
 	struct ctl_table tbl;
@@ -362,8 +383,7 @@ static int proc_sctp_do_hmac_alg(struct ctl_table *ctl, int write,
 }
 
 static int proc_sctp_do_rto_min(struct ctl_table *ctl, int write,
-				void __user *buffer, size_t *lenp,
-				loff_t *ppos)
+				void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct net *net = current->nsproxy->net_ns;
 	unsigned int min = *(unsigned int *) ctl->extra1;
@@ -391,8 +411,7 @@ static int proc_sctp_do_rto_min(struct ctl_table *ctl, int write,
 }
 
 static int proc_sctp_do_rto_max(struct ctl_table *ctl, int write,
-				void __user *buffer, size_t *lenp,
-				loff_t *ppos)
+				void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct net *net = current->nsproxy->net_ns;
 	unsigned int min = *(unsigned int *) ctl->extra1;
@@ -420,8 +439,7 @@ static int proc_sctp_do_rto_max(struct ctl_table *ctl, int write,
 }
 
 static int proc_sctp_do_alpha_beta(struct ctl_table *ctl, int write,
-				   void __user *buffer, size_t *lenp,
-				   loff_t *ppos)
+				   void *buffer, size_t *lenp, loff_t *ppos)
 {
 	if (write)
 		pr_warn_once("Changing rto_alpha or rto_beta may lead to "
@@ -431,8 +449,7 @@ static int proc_sctp_do_alpha_beta(struct ctl_table *ctl, int write,
 }
 
 static int proc_sctp_do_auth(struct ctl_table *ctl, int write,
-			     void __user *buffer, size_t *lenp,
-			     loff_t *ppos)
+			     void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct net *net = current->nsproxy->net_ns;
 	struct ctl_table tbl;

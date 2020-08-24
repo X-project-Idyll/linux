@@ -2,14 +2,23 @@
 /*
  * Copyright (C) 2012 Russell King
  */
+
 #include <linux/clk.h>
 #include <linux/component.h>
 #include <linux/module.h>
 #include <linux/of_graph.h>
+#include <linux/platform_device.h>
+
 #include <drm/drm_atomic_helper.h>
+#include <drm/drm_drv.h>
+#include <drm/drm_ioctl.h>
+#include <drm/drm_managed.h>
+#include <drm/drm_prime.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_fb_helper.h>
 #include <drm/drm_of.h>
+#include <drm/drm_vblank.h>
+
 #include "armada_crtc.h"
 #include "armada_drm.h"
 #include "armada_gem.h"
@@ -40,8 +49,7 @@ static struct drm_driver armada_drm_driver = {
 	.name			= "armada-drm",
 	.desc			= "Armada SoC DRM",
 	.date			= "20120730",
-	.driver_features	= DRIVER_GEM | DRIVER_MODESET |
-				  DRIVER_PRIME | DRIVER_ATOMIC,
+	.driver_features	= DRIVER_GEM | DRIVER_MODESET | DRIVER_ATOMIC,
 	.ioctls			= armada_ioctls,
 	.fops			= &armada_drm_fops,
 };
@@ -96,6 +104,7 @@ static int armada_drm_bind(struct device *dev)
 		kfree(priv);
 		return ret;
 	}
+	drmm_add_final_kfree(&priv->drm, priv);
 
 	/* Remove early framebuffers */
 	ret = drm_fb_helper_remove_conflicting_framebuffers(NULL,
@@ -304,7 +313,7 @@ static void __exit armada_drm_exit(void)
 }
 module_exit(armada_drm_exit);
 
-MODULE_AUTHOR("Russell King <rmk+kernel@arm.linux.org.uk>");
+MODULE_AUTHOR("Russell King <rmk+kernel@armlinux.org.uk>");
 MODULE_DESCRIPTION("Armada DRM Driver");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("platform:armada-drm");

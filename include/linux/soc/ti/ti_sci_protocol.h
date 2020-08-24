@@ -2,7 +2,7 @@
 /*
  * Texas Instruments System Control Interface Protocol
  *
- * Copyright (C) 2015-2016 Texas Instruments Incorporated - http://www.ti.com/
+ * Copyright (C) 2015-2016 Texas Instruments Incorporated - https://www.ti.com/
  *	Nishanth Menon
  */
 
@@ -97,7 +97,10 @@ struct ti_sci_core_ops {
  */
 struct ti_sci_dev_ops {
 	int (*get_device)(const struct ti_sci_handle *handle, u32 id);
+	int (*get_device_exclusive)(const struct ti_sci_handle *handle, u32 id);
 	int (*idle_device)(const struct ti_sci_handle *handle, u32 id);
+	int (*idle_device_exclusive)(const struct ti_sci_handle *handle,
+				     u32 id);
 	int (*put_device)(const struct ti_sci_handle *handle, u32 id);
 	int (*is_valid)(const struct ti_sci_handle *handle, u32 id);
 	int (*get_context_loss_count)(const struct ti_sci_handle *handle,
@@ -223,8 +226,8 @@ struct ti_sci_rm_core_ops {
  *			and destination
  * @set_event_map:	Set an Event based peripheral irq to Interrupt
  *			Aggregator.
- * @free_irq:		Free an an IRQ route between the requested source
- *			destination.
+ * @free_irq:		Free an IRQ route between the requested source
+ *			and destination.
  * @free_event_map:	Free an event based peripheral irq to Interrupt
  *			Aggregator.
  */

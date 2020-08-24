@@ -26,6 +26,24 @@
 #include <linux/writeback.h>
 #include "ubifs.h"
 
+static int ubifs_default_version_set(const char *val, const struct kernel_param *kp)
+{
+	int n = 0, ret;
+
+	ret = kstrtoint(val, 10, &n);
+	if (ret != 0 || n < 4 || n > UBIFS_FORMAT_VERSION)
+		return -EINVAL;
+	return param_set_int(val, kp);
+}
+
+static const struct kernel_param_ops ubifs_default_version_ops = {
+	.set = ubifs_default_version_set,
+	.get = param_get_int,
+};
+
+int ubifs_default_version = UBIFS_FORMAT_VERSION;
+module_param_cb(default_version, &ubifs_default_version_ops, &ubifs_default_version, 0600);
+
 /*
  * Maximum amount of memory we may 'kmalloc()' without worrying that we are
  * allocating too much.
@@ -316,6 +334,16 @@ static int ubifs_write_inode(struct inode *inode, struct writeback_control *wbc)
 	mutex_unlock(&ui->ui_mutex);
 	ubifs_release_dirty_inode_budget(c, ui);
 	return err;
+}
+
+static int ubifs_drop_inode(struct inode *inode)
+{
+	int drop = generic_drop_inode(inode);
+
+	if (!drop)
+		drop = fscrypt_drop_inode(inode);
+
+	return drop;
 }
 
 static void ubifs_evict_inode(struct inode *inode)
@@ -1589,6 +1617,7 @@ out_free:
 	vfree(c->ileb_buf);
 	vfree(c->sbuf);
 	kfree(c->bottom_up_buf);
+	kfree(c->sup_node);
 	ubifs_debugging_exit(c);
 	return err;
 }
@@ -1631,6 +1660,7 @@ static void ubifs_umount(struct ubifs_info *c)
 	vfree(c->ileb_buf);
 	vfree(c->sbuf);
 	kfree(c->bottom_up_buf);
+	kfree(c->sup_node);
 	ubifs_debugging_exit(c);
 }
 
@@ -1994,6 +2024,7 @@ const struct super_operations ubifs_super_operations = {
 	.free_inode    = ubifs_free_inode,
 	.put_super     = ubifs_put_super,
 	.write_inode   = ubifs_write_inode,
+	.drop_inode    = ubifs_drop_inode,
 	.evict_inode   = ubifs_evict_inode,
 	.statfs        = ubifs_statfs,
 	.dirty_inode   = ubifs_dirty_inode,

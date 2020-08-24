@@ -281,7 +281,7 @@ struct s5k5baf_fw {
 		u16 id;
 		u16 offset;
 	} seq[0];
-	u16 data[0];
+	u16 data[];
 };
 
 struct s5k5baf {
@@ -1946,8 +1946,7 @@ static int s5k5baf_configure_regulators(struct s5k5baf *state)
 	return ret;
 }
 
-static int s5k5baf_probe(struct i2c_client *c,
-			const struct i2c_device_id *id)
+static int s5k5baf_probe(struct i2c_client *c)
 {
 	struct s5k5baf *state;
 	int ret;
@@ -2046,7 +2045,7 @@ static struct i2c_driver s5k5baf_i2c_driver = {
 		.of_match_table = s5k5baf_of_match,
 		.name = S5K5BAF_DRIVER_NAME
 	},
-	.probe		= s5k5baf_probe,
+	.probe_new	= s5k5baf_probe,
 	.remove		= s5k5baf_remove,
 	.id_table	= s5k5baf_id,
 };

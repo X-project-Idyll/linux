@@ -83,6 +83,10 @@ restart_on_corruption
     not compatible with ignore_corruption and requires user space support to
     avoid restart loops.
 
+panic_on_corruption
+    Panic the device when a corrupted block is discovered. This option is
+    not compatible with ignore_corruption and restart_on_corruption.
+
 ignore_zero_blocks
     Do not verify blocks that are expected to contain zeroes and always return
     zeroes instead. This may be useful if the partition contains unused blocks
@@ -124,6 +128,13 @@ check_at_most_once
     since verification of hash blocks is less performance critical than data
     blocks, and a hash block will not be verified any more after all the data
     blocks it covers have been verified anyway.
+
+root_hash_sig_key_desc <key_description>
+    This is the description of the USER_KEY that the kernel will lookup to get
+    the pkcs7 signature of the roothash. The pkcs7 signature is used to validate
+    the root hash during the creation of the device mapper block device.
+    Verification of roothash depends on the config DM_VERITY_VERIFY_ROOTHASH_SIG
+    being set in the kernel.
 
 Theory of operation
 ===================

@@ -2,7 +2,7 @@
 /*
  * Texas Instruments' K3 Interrupt Aggregator irqchip driver
  *
- * Copyright (C) 2018-2019 Texas Instruments Incorporated - http://www.ti.com/
+ * Copyright (C) 2018-2019 Texas Instruments Incorporated - https://www.ti.com/
  *	Lokesh Vutla <lokeshvutla@ti.com>
  */
 
@@ -37,6 +37,7 @@
 #define VINT_ENABLE_SET_OFFSET	0x0
 #define VINT_ENABLE_CLR_OFFSET	0x8
 #define VINT_STATUS_OFFSET	0x18
+#define VINT_STATUS_MASKED_OFFSET	0x20
 
 /**
  * struct ti_sci_inta_event_desc - Description of an event coming to
@@ -116,7 +117,7 @@ static void ti_sci_inta_irq_handler(struct irq_desc *desc)
 	chained_irq_enter(irq_desc_get_chip(desc), desc);
 
 	val = readq_relaxed(inta->base + vint_desc->vint_id * 0x1000 +
-			    VINT_STATUS_OFFSET);
+			    VINT_STATUS_MASKED_OFFSET);
 
 	for_each_set_bit(bit, &val, MAX_EVENTS_PER_VINT) {
 		virq = irq_find_mapping(domain, vint_desc->events[bit].hwirq);
@@ -246,8 +247,8 @@ static struct ti_sci_inta_event_desc *ti_sci_inta_alloc_irq(struct irq_domain *d
 	/* No free bits available. Allocate a new vint */
 	vint_desc = ti_sci_inta_alloc_parent_irq(domain);
 	if (IS_ERR(vint_desc)) {
-		mutex_unlock(&inta->vint_mutex);
-		return ERR_PTR(PTR_ERR(vint_desc));
+		event_desc = ERR_CAST(vint_desc);
+		goto unlock;
 	}
 
 	free_bit = find_first_zero_bit(vint_desc->event_map,
@@ -259,6 +260,7 @@ alloc_event:
 	if (IS_ERR(event_desc))
 		clear_bit(free_bit, vint_desc->event_map);
 
+unlock:
 	mutex_unlock(&inta->vint_mutex);
 	return event_desc;
 }
@@ -431,8 +433,6 @@ static int ti_sci_inta_set_type(struct irq_data *data, unsigned int type)
 	default:
 		return -EINVAL;
 	}
-
-	return -EINVAL;
 }
 
 static struct irq_chip ti_sci_inta_irq_chip = {
@@ -570,7 +570,7 @@ static int ti_sci_inta_irq_domain_probe(struct platform_device *pdev)
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	inta->base = devm_ioremap_resource(dev, res);
 	if (IS_ERR(inta->base))
-		return -ENODEV;
+		return PTR_ERR(inta->base);
 
 	domain = irq_domain_add_linear(dev_of_node(dev),
 				       ti_sci_get_num_resources(inta->vint),
@@ -610,6 +610,6 @@ static struct platform_driver ti_sci_inta_irq_domain_driver = {
 };
 module_platform_driver(ti_sci_inta_irq_domain_driver);
 
-MODULE_AUTHOR("Lokesh Vutla <lokeshvutla@ticom>");
+MODULE_AUTHOR("Lokesh Vutla <lokeshvutla@ti.com>");
 MODULE_DESCRIPTION("K3 Interrupt Aggregator driver over TI SCI protocol");
 MODULE_LICENSE("GPL v2");

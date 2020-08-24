@@ -261,8 +261,7 @@ hfcsusb_ph_info(struct hfcsusb *hw)
 		phi->bch[i].Flags = hw->bch[i].Flags;
 	}
 	_queue_data(&dch->dev.D, MPH_INFORMATION_IND, MISDN_ID_ANY,
-		    sizeof(struct ph_info_dch) + dch->dev.nrbchan *
-		    sizeof(struct ph_info_ch), phi, GFP_ATOMIC);
+		    struct_size(phi, bch, dch->dev.nrbchan), phi, GFP_ATOMIC);
 	kfree(phi);
 }
 
@@ -841,8 +840,8 @@ hfcsusb_rx_frame(struct usb_fifo *fifo, __u8 *data, unsigned int len,
 		if (maxlen < 0) {
 			if (rx_skb)
 				skb_trim(rx_skb, 0);
-			pr_warning("%s.B%d: No bufferspace for %d bytes\n",
-				   hw->name, fifo->bch->nr, len);
+			pr_warn("%s.B%d: No bufferspace for %d bytes\n",
+				hw->name, fifo->bch->nr, len);
 			spin_unlock_irqrestore(&hw->lock, flags);
 			return;
 		}

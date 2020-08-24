@@ -11,12 +11,14 @@
  * crtc, HDMI encoder).
  */
 
-#include <drm/drm_crtc.h>
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
+#include <drm/drm_crtc.h>
 #include <drm/drm_gem_framebuffer_helper.h>
 #include <drm/drm_plane_helper.h>
 #include <drm/drm_probe_helper.h>
+#include <drm/drm_vblank.h>
+
 #include "vc4_drv.h"
 #include "vc4_regs.h"
 
@@ -328,7 +330,7 @@ static struct drm_framebuffer *vc4_fb_create(struct drm_device *dev,
 			mode_cmd_local.modifier[0] = DRM_FORMAT_MOD_NONE;
 		}
 
-		drm_gem_object_put_unlocked(gem_obj);
+		drm_gem_object_put(gem_obj);
 
 		mode_cmd = &mode_cmd_local;
 	}

@@ -89,9 +89,15 @@ static void usnic_ib_dump_vf(struct usnic_ib_vf *vf, char *buf, int buf_sz)
 
 void usnic_ib_log_vf(struct usnic_ib_vf *vf)
 {
-	char buf[1000];
-	usnic_ib_dump_vf(vf, buf, sizeof(buf));
+	char *buf = kzalloc(1000, GFP_KERNEL);
+
+	if (!buf)
+		return;
+
+	usnic_ib_dump_vf(vf, buf, 1000);
 	usnic_dbg("%s\n", buf);
+
+	kfree(buf);
 }
 
 /* Start of netdev section */
@@ -114,7 +120,7 @@ static void usnic_ib_qp_grp_modify_active_to_err(struct usnic_ib_dev *us_ibdev)
 								IB_QPS_ERR,
 								NULL);
 				if (status) {
-					usnic_err("Failed to transistion qp grp %u from %s to %s\n",
+					usnic_err("Failed to transition qp grp %u from %s to %s\n",
 						qp_grp->grp_id,
 						usnic_ib_qp_grp_state_to_string
 						(cur_state),

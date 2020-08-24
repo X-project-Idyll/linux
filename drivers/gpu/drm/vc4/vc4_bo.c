@@ -490,7 +490,7 @@ int vc4_dumb_create(struct drm_file *file_priv,
 	bo->madv = VC4_MADV_WILLNEED;
 
 	ret = drm_gem_handle_create(file_priv, &bo->base.base, &args->handle);
-	drm_gem_object_put_unlocked(&bo->base.base);
+	drm_gem_object_put(&bo->base.base);
 
 	return ret;
 }
@@ -655,8 +655,7 @@ static void vc4_bo_cache_time_timer(struct timer_list *t)
 	schedule_work(&vc4->bo_cache.time_work);
 }
 
-struct dma_buf *
-vc4_prime_export(struct drm_device *dev, struct drm_gem_object *obj, int flags)
+struct dma_buf * vc4_prime_export(struct drm_gem_object *obj, int flags)
 {
 	struct vc4_bo *bo = to_vc4_bo(obj);
 	struct dma_buf *dmabuf;
@@ -678,7 +677,7 @@ vc4_prime_export(struct drm_device *dev, struct drm_gem_object *obj, int flags)
 		return ERR_PTR(ret);
 	}
 
-	dmabuf = drm_gem_prime_export(dev, obj, flags);
+	dmabuf = drm_gem_prime_export(obj, flags);
 	if (IS_ERR(dmabuf))
 		vc4_bo_dec_usecnt(bo);
 
@@ -791,8 +790,6 @@ vc4_prime_import_sg_table(struct drm_device *dev,
 	if (IS_ERR(obj))
 		return obj;
 
-	obj->resv = attach->dmabuf->resv;
-
 	return obj;
 }
 
@@ -837,7 +834,7 @@ int vc4_create_bo_ioctl(struct drm_device *dev, void *data,
 	bo->madv = VC4_MADV_WILLNEED;
 
 	ret = drm_gem_handle_create(file_priv, &bo->base.base, &args->handle);
-	drm_gem_object_put_unlocked(&bo->base.base);
+	drm_gem_object_put(&bo->base.base);
 
 	return ret;
 }
@@ -857,7 +854,7 @@ int vc4_mmap_bo_ioctl(struct drm_device *dev, void *data,
 	/* The mmap offset was set up at BO allocation time. */
 	args->offset = drm_vma_node_offset_addr(&gem_obj->vma_node);
 
-	drm_gem_object_put_unlocked(gem_obj);
+	drm_gem_object_put(gem_obj);
 	return 0;
 }
 
@@ -921,7 +918,7 @@ vc4_create_shader_bo_ioctl(struct drm_device *dev, void *data,
 	ret = drm_gem_handle_create(file_priv, &bo->base.base, &args->handle);
 
 fail:
-	drm_gem_object_put_unlocked(&bo->base.base);
+	drm_gem_object_put(&bo->base.base);
 
 	return ret;
 }
@@ -968,7 +965,7 @@ int vc4_set_tiling_ioctl(struct drm_device *dev, void *data,
 	bo = to_vc4_bo(gem_obj);
 	bo->t_format = t_format;
 
-	drm_gem_object_put_unlocked(gem_obj);
+	drm_gem_object_put(gem_obj);
 
 	return 0;
 }
@@ -1003,7 +1000,7 @@ int vc4_get_tiling_ioctl(struct drm_device *dev, void *data,
 	else
 		args->modifier = DRM_FORMAT_MOD_NONE;
 
-	drm_gem_object_put_unlocked(gem_obj);
+	drm_gem_object_put(gem_obj);
 
 	return 0;
 }
@@ -1094,7 +1091,7 @@ int vc4_label_bo_ioctl(struct drm_device *dev, void *data,
 		ret = -ENOMEM;
 	mutex_unlock(&vc4->bo_lock);
 
-	drm_gem_object_put_unlocked(gem_obj);
+	drm_gem_object_put(gem_obj);
 
 	return ret;
 }

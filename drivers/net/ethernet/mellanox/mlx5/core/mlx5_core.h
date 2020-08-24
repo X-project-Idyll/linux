@@ -38,7 +38,6 @@
 #include <linux/sched.h>
 #include <linux/if_link.h>
 #include <linux/firmware.h>
-#include <linux/ptp_clock_kernel.h>
 #include <linux/mlx5/cq.h>
 #include <linux/mlx5/fs.h>
 #include <linux/mlx5/driver.h>
@@ -141,12 +140,10 @@ int mlx5_modify_scheduling_element_cmd(struct mlx5_core_dev *dev, u8 hierarchy,
 int mlx5_destroy_scheduling_element_cmd(struct mlx5_core_dev *dev, u8 hierarchy,
 					u32 element_id);
 int mlx5_wait_for_pages(struct mlx5_core_dev *dev, int *pages);
-u64 mlx5_read_internal_timer(struct mlx5_core_dev *dev,
-			     struct ptp_system_timestamp *sts);
 
 void mlx5_cmd_trigger_completions(struct mlx5_core_dev *dev);
 void mlx5_cmd_flush(struct mlx5_core_dev *dev);
-int mlx5_cq_debugfs_init(struct mlx5_core_dev *dev);
+void mlx5_cq_debugfs_init(struct mlx5_core_dev *dev);
 void mlx5_cq_debugfs_cleanup(struct mlx5_core_dev *dev);
 
 int mlx5_query_pcam_reg(struct mlx5_core_dev *dev, u32 *pcam, u8 feature_group,
@@ -182,7 +179,7 @@ void mlx5_remove_device(struct mlx5_interface *intf, struct mlx5_priv *priv);
 void mlx5_attach_device(struct mlx5_core_dev *dev);
 void mlx5_detach_device(struct mlx5_core_dev *dev);
 bool mlx5_device_registered(struct mlx5_core_dev *dev);
-int mlx5_register_device(struct mlx5_core_dev *dev);
+void mlx5_register_device(struct mlx5_core_dev *dev);
 void mlx5_unregister_device(struct mlx5_core_dev *dev);
 void mlx5_add_dev_by_protocol(struct mlx5_core_dev *dev, int protocol);
 void mlx5_remove_dev_by_protocol(struct mlx5_core_dev *dev, int protocol);
@@ -197,6 +194,9 @@ int mlx5_query_mtpps(struct mlx5_core_dev *dev, u32 *mtpps, u32 mtpps_size);
 int mlx5_set_mtpps(struct mlx5_core_dev *mdev, u32 *mtpps, u32 mtpps_size);
 int mlx5_query_mtppse(struct mlx5_core_dev *mdev, u8 pin, u8 *arm, u8 *mode);
 int mlx5_set_mtppse(struct mlx5_core_dev *mdev, u8 pin, u8 arm, u8 mode);
+
+struct mlx5_dm *mlx5_dm_create(struct mlx5_core_dev *dev);
+void mlx5_dm_cleanup(struct mlx5_core_dev *dev);
 
 #define MLX5_PPS_CAP(mdev) (MLX5_CAP_GEN((mdev), pps) &&		\
 			    MLX5_CAP_GEN((mdev), pps_modify) &&		\
@@ -240,4 +240,7 @@ enum {
 
 u8 mlx5_get_nic_state(struct mlx5_core_dev *dev);
 void mlx5_set_nic_state(struct mlx5_core_dev *dev, u8 state);
+
+void mlx5_unload_one(struct mlx5_core_dev *dev, bool cleanup);
+int mlx5_load_one(struct mlx5_core_dev *dev, bool boot);
 #endif /* __MLX5_CORE_H__ */

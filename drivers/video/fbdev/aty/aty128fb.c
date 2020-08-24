@@ -334,20 +334,6 @@ static const struct aty128_meminfo sdr_128 = {
 	.name = "128-bit SDR SGRAM (1:1)",
 };
 
-static const struct aty128_meminfo sdr_64 = {
-	.ML = 4,
-	.MB = 8,
-	.Trcd = 3,
-	.Trp = 3,
-	.Twr = 1,
-	.CL = 3,
-	.Tr2w = 1,
-	.LoopLatency = 17,
-	.DspOn = 46,
-	.Rloop = 17,
-	.name = "64-bit SDR SGRAM (1:1)",
-};
-
 static const struct aty128_meminfo sdr_sgram = {
 	.ML = 4,
 	.MB = 4,
@@ -398,11 +384,7 @@ static int default_lcd_on = 1;
 static bool mtrr = true;
 
 #ifdef CONFIG_FB_ATY128_BACKLIGHT
-#ifdef CONFIG_PMAC_BACKLIGHT
-static int backlight = 1;
-#else
-static int backlight = 0;
-#endif
+static int backlight = IS_BUILTIN(CONFIG_PMAC_BACKLIGHT);
 #endif
 
 /* PLL constants */
@@ -487,11 +469,6 @@ static int aty128_encode_var(struct fb_var_screeninfo *var,
                              const struct aty128fb_par *par);
 static int aty128_decode_var(struct fb_var_screeninfo *var,
                              struct aty128fb_par *par);
-#if 0
-static void aty128_get_pllinfo(struct aty128fb_par *par, void __iomem *bios);
-static void __iomem *aty128_map_ROM(struct pci_dev *pdev,
-				    const struct aty128fb_par *par);
-#endif
 static void aty128_timings(struct aty128fb_par *par);
 static void aty128_init_engine(struct aty128fb_par *par);
 static void aty128_reset_engine(const struct aty128fb_par *par);
@@ -514,7 +491,7 @@ static void aty128_bl_set_power(struct fb_info *info, int power);
 			  (readb(bios + (v) + 3) << 24))
 
 
-static struct fb_ops aty128fb_ops = {
+static const struct fb_ops aty128fb_ops = {
 	.owner		= THIS_MODULE,
 	.fb_check_var	= aty128fb_check_var,
 	.fb_set_par	= aty128fb_set_par,
@@ -1665,19 +1642,6 @@ static void aty128_st_pal(u_int regno, u_int red, u_int green, u_int blue,
 			  struct aty128fb_par *par)
 {
 	if (par->chip_gen == rage_M3) {
-#if 0
-		/* Note: For now, on M3, we set palette on both heads, which may
-		 * be useless. Can someone with a M3 check this ?
-		 * 
-		 * This code would still be useful if using the second CRTC to 
-		 * do mirroring
-		 */
-
-		aty_st_le32(DAC_CNTL, aty_ld_le32(DAC_CNTL) |
-			    DAC_PALETTE_ACCESS_CNTL);
-		aty_st_8(PALETTE_INDEX, regno);
-		aty_st_le32(PALETTE_DATA, (red<<16)|(green<<8)|blue);
-#endif
 		aty_st_le32(DAC_CNTL, aty_ld_le32(DAC_CNTL) &
 			    ~DAC_PALETTE_ACCESS_CNTL);
 	}

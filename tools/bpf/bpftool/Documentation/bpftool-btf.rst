@@ -19,6 +19,7 @@ SYNOPSIS
 BTF COMMANDS
 =============
 
+|	**bpftool** **btf** { **show** | **list** } [**id** *BTF_ID*]
 |	**bpftool** **btf dump** *BTF_SRC* [**format** *FORMAT*]
 |	**bpftool** **btf help**
 |
@@ -29,6 +30,17 @@ BTF COMMANDS
 
 DESCRIPTION
 ===========
+	**bpftool btf { show | list }** [**id** *BTF_ID*]
+		  Show information about loaded BTF objects. If a BTF ID is
+		  specified, show information only about given BTF object,
+		  otherwise list all BTF objects currently loaded on the
+		  system.
+
+		  Since Linux 5.8 bpftool is able to discover information about
+		  processes that hold open file descriptors (FDs) against BTF
+		  objects. On such kernels bpftool will automatically emit this
+		  information as well.
+
 	**bpftool btf dump** *BTF_SRC*
 		  Dump BTF entries from a given *BTF_SRC*.
 
@@ -223,9 +235,14 @@ SEE ALSO
 	**bpf**\ (2),
 	**bpf-helpers**\ (7),
 	**bpftool**\ (8),
-	**bpftool-map**\ (8),
-	**bpftool-prog**\ (8),
+	**bpftool-btf**\ (8),
 	**bpftool-cgroup**\ (8),
 	**bpftool-feature**\ (8),
+	**bpftool-gen**\ (8),
+	**bpftool-iter**\ (8),
+	**bpftool-link**\ (8),
+	**bpftool-map**\ (8),
 	**bpftool-net**\ (8),
-	**bpftool-perf**\ (8)
+	**bpftool-perf**\ (8),
+	**bpftool-prog**\ (8),
+	**bpftool-struct_ops**\ (8)

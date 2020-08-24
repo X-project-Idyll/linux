@@ -117,7 +117,7 @@
 #define BMC150_ACCEL_SLEEP_1_SEC		0x0F
 
 #define BMC150_ACCEL_REG_TEMP			0x08
-#define BMC150_ACCEL_TEMP_CENTER_VAL		24
+#define BMC150_ACCEL_TEMP_CENTER_VAL		23
 
 #define BMC150_ACCEL_AXIS_TO_REG(axis)	(BMC150_ACCEL_REG_XOUT_L + (axis * 2))
 #define BMC150_AUTO_SUSPEND_DELAY_MS		2000
@@ -1411,7 +1411,7 @@ static int bmc150_accel_buffer_postenable(struct iio_dev *indio_dev)
 	int ret = 0;
 
 	if (indio_dev->currentmode == INDIO_BUFFER_TRIGGERED)
-		return iio_triggered_buffer_postenable(indio_dev);
+		return 0;
 
 	mutex_lock(&data->mutex);
 
@@ -1443,7 +1443,7 @@ static int bmc150_accel_buffer_predisable(struct iio_dev *indio_dev)
 	struct bmc150_accel_data *data = iio_priv(indio_dev);
 
 	if (indio_dev->currentmode == INDIO_BUFFER_TRIGGERED)
-		return iio_triggered_buffer_predisable(indio_dev);
+		return 0;
 
 	mutex_lock(&data->mutex);
 
@@ -1574,7 +1574,6 @@ int bmc150_accel_core_probe(struct device *dev, struct regmap *regmap, int irq,
 
 	mutex_init(&data->mutex);
 
-	indio_dev->dev.parent = dev;
 	indio_dev->channels = data->chip_info->channels;
 	indio_dev->num_channels = data->chip_info->num_channels;
 	indio_dev->name = name ? name : data->chip_info->name;
